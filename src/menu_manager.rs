@@ -1,7 +1,7 @@
 //! The Menu Manager looks after the menu and where we currently are within it.
 #![deny(missing_docs)]
 
-use super::{ItemType, Menu};
+use super::{ItemType, Menu, MenuError};
 
 /// Holds a nested tree of Menus and remembers which menu within the tree we're
 /// currently looking at.
@@ -38,15 +38,20 @@ impl<'a, I, T> MenuManager<'a, I, T> {
     ///
     /// The index must be the index of a valid sub-menu, not any other kind of
     /// item. Do not push too many items.
-    pub fn push_menu(&mut self, index: usize) {
+    pub fn push_menu(&mut self, index: usize) -> Result<(), MenuError> {
         let menu = self.get_menu(None);
         let item = menu.items[index];
         if !matches!(item.item_type, ItemType::Menu(_)) {
             panic!("Specified index is not a menu");
         }
 
-        let pos = self.menu_index.iter_mut().find(|x| x.is_none()).unwrap();
+        let pos = self
+            .menu_index
+            .iter_mut()
+            .find(|x| x.is_none())
+            .ok_or(MenuError::NestedTooDeep)?;
         pos.replace(index);
+        Ok(())
     }
 
     /// Get a menu.

@@ -20,6 +20,17 @@ pub type MenuCallbackFn<I, T> = fn(menu: &Menu<I, T>, interface: &mut I, context
 pub type ItemCallbackFn<I, T> =
     fn(menu: &Menu<I, T>, item: &Item<I, T>, args: &[&str], interface: &mut I, context: &mut T);
 
+pub enum MenuError {
+    WriteError,
+    NestedTooDeep,
+}
+
+impl<E> From<embedded_io::WriteFmtError<E>> for MenuError {
+    fn from(_: embedded_io::WriteFmtError<E>) -> Self {
+        MenuError::WriteError
+    }
+}
+
 #[derive(Debug)]
 /// Describes a parameter to the command
 pub enum Parameter<'a> {
@@ -357,7 +368,7 @@ where
                 menu_mgr: super::menu_manager::MenuManager::new(menu),
             },
         };
-        r.inner.prompt(&mut r.interface, true).await;
+        let _ = r.inner.prompt(&mut r.interface, true).await;
         r
     }
 }
@@ -378,13 +389,14 @@ where
         #[cfg(not(feature = "echo"))]
         {
             // Echo the command
-            write!(self.interface, "\r").unwrap();
-            write!(self.interface, "{}", line).unwrap();
+            write!(self.interface, "\r")?;
+            write!(self.interface, "{}", line)?;
         }
 
         self.inner
             .process_command(&mut self.interface, context, line)
-            .await;
+            .await
+            .map_err(|_| NolineError::IoError(embedded_io::ErrorKind::BrokenPipe))?;
 
         Ok(())
     }
@@ -400,10 +412,10 @@ where
     /// performed.
     /// By default, an echo feature is enabled to display commands on the terminal.
     #[bisync]
-    pub async fn input_byte(&mut self, input: u8, context: &mut T) {
+    pub async fn input_byte(&mut self, input: u8, context: &mut T) -> Result<(), MenuError> {
         // Strip carriage returns
         if input == 0x0A {
-            return;
+            return Ok(());
         }
         let buffer = self.buffer.as_mut();
 
@@ -412,23 +424,23 @@ where
                 #[cfg(not(feature = "echo"))]
                 {
                     // Echo the command
-                    write!(self.interface, "\r").unwrap();
-                    write!(self.interface, "{}", line).unwrap();
+                    write!(self.interface, "\r")?;
+                    write!(self.interface, "{}", line)?;
                 }
                 // Handle the command
                 self.inner
                     .process_command(&mut self.interface, context, line)
-                    .await;
+                    .await?;
             } else {
                 // Hmm ..  we did not have a valid string
-                writeln!(self.interface, "Input was not valid UTF-8").unwrap();
+                writeln!(self.interface, "Input was not valid UTF-8")?;
             }
 
             Outcome::CommandProcessed
         } else if (input == 0x08) || (input == 0x7F) {
             // Handling backspace or delete
             if self.used > 0 {
-                write!(self.interface, "\u{0008} \u{0008}").unwrap();
+                write!(self.interface, "\u{0008} \u{0008}")?;
                 self.used -= 1;
             }
             Outcome::NeedMore
@@ -445,25 +457,26 @@ where
                 let valid = core::str::from_utf8(&buffer[0..self.used]).is_ok();
                 // Now we've released the buffer, we can draw the prompt
                 if valid {
-                    write!(self.interface, "\r").unwrap();
-                    self.inner.prompt(&mut self.interface, false).await;
+                    write!(self.interface, "\r")?;
+                    self.inner.prompt(&mut self.interface, false).await?;
                 }
                 // Grab the buffer again to render it to the screen
                 if let Ok(s) = core::str::from_utf8(&buffer[0..self.used]) {
-                    write!(self.interface, "{}", s).unwrap();
+                    write!(self.interface, "{}", s)?;
                 }
             }
             Outcome::NeedMore
         } else {
-            writeln!(self.interface, "Buffer overflow!").unwrap();
+            writeln!(self.interface, "Buffer overflow!")?;
             Outcome::NeedMore
         };
         match outcome {
             Outcome::CommandProcessed => {
                 self.used = 0;
-                self.inner.prompt(&mut self.interface, true).await;
+                self.inner.prompt(&mut self.interface, true).await?;
+                Ok(())
             }
-            Outcome::NeedMore => {}
+            Outcome::NeedMore => Ok(()),
         }
     }
 }
@@ -475,19 +488,25 @@ where
     /// Print out a new command prompt, including sub-menu names if
     /// applicable.
     #[bisync]
-    pub async fn prompt(&mut self, interface: &mut I, newline: bool) {
+    pub async fn prompt(&mut self, interface: &mut I, newline: bool) -> Result<(), MenuError> {
         let prompt = PromptIter::new(&self.menu_mgr, newline);
 
         for part in prompt {
-            write!(interface, "{}", part).unwrap();
+            write!(interface, "{}", part)?;
         }
+        Ok(())
     }
 
     /// Scan the buffer and do the right thing based on its contents.
     #[bisync]
-    async fn process_command(&mut self, interface: &mut I, context: &mut T, command_line: &str) {
+    async fn process_command(
+        &mut self,
+        interface: &mut I,
+        context: &mut T,
+        command_line: &str,
+    ) -> Result<(), MenuError> {
         // Go to the next line, below the prompt
-        writeln!(interface).unwrap();
+        writeln!(interface)?;
         // We have a valid string
         let mut parts = command_line.split_whitespace();
         if let Some(cmd) = parts.next() {
@@ -496,16 +515,16 @@ where
                 match parts.next() {
                     Some(arg) => match menu.items.iter().find(|i| i.command == arg) {
                         Some(item) => {
-                            self.print_long_help(interface, item);
+                            self.print_long_help(interface, item)?;
                         }
                         None => {
-                            writeln!(interface, "I can't help with {:?}", arg).unwrap();
+                            writeln!(interface, "I can't help with {:?}", arg)?;
                         }
                     },
                     _ => {
-                        writeln!(interface, "AVAILABLE ITEMS:").unwrap();
+                        writeln!(interface, "AVAILABLE ITEMS:")?;
                         for item in menu.items {
-                            self.print_short_help(interface, item);
+                            self.print_short_help(interface, item)?;
                         }
                         if self.menu_mgr.depth() != 0 {
                             self.print_short_help(
@@ -515,7 +534,7 @@ where
                                     help: Some("Leave this menu."),
                                     item_type: ItemType::_Dummy,
                                 },
-                            );
+                            )?;
                         }
                         self.print_short_help(
                             interface,
@@ -524,7 +543,7 @@ where
                                 help: Some("Show this help, or get help on a specific command."),
                                 item_type: ItemType::_Dummy,
                             },
-                        );
+                        )?;
                     }
                 }
             } else if cmd == "exit" && self.menu_mgr.depth() != 0 {
@@ -548,12 +567,12 @@ where
                                 menu,
                                 item,
                                 command_line,
-                            ),
+                            )?,
                             ItemType::Menu(incoming_menu) => {
                                 if let Some(cb_fn) = incoming_menu.entry {
                                     cb_fn(incoming_menu, interface, context);
                                 }
-                                self.menu_mgr.push_menu(i);
+                                self.menu_mgr.push_menu(i)?;
                             }
                             ItemType::_Dummy => {
                                 unreachable!();
@@ -564,27 +583,28 @@ where
                     }
                 }
                 if !found {
-                    writeln!(interface, "Command {:?} not found. Try 'help'.", cmd).unwrap();
+                    writeln!(interface, "Command {:?} not found. Try 'help'.", cmd)?;
                 }
             }
         } else {
-            writeln!(interface, "Input was empty?").unwrap();
+            writeln!(interface, "Input was empty?")?;
         }
+        Ok(())
     }
 
-    fn print_short_help(&mut self, interface: &mut I, item: &Item<I, T>) {
+    fn print_short_help(&mut self, interface: &mut I, item: &Item<I, T>) -> Result<(), MenuError> {
         let mut has_options = false;
         match item.item_type {
             ItemType::Callback { parameters, .. } => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
                 if !parameters.is_empty() {
                     for param in parameters.iter() {
                         match param {
                             Parameter::Mandatory { parameter_name, .. } => {
-                                write!(interface, " <{}>", parameter_name).unwrap();
+                                write!(interface, " <{}>", parameter_name)?;
                             }
                             Parameter::Optional { parameter_name, .. } => {
-                                write!(interface, " [ <{}> ]", parameter_name).unwrap();
+                                write!(interface, " [ <{}> ]", parameter_name)?;
                             }
                             Parameter::Named { .. } => {
                                 has_options = true;
@@ -597,46 +617,46 @@ where
                 }
             }
             ItemType::Menu(_menu) => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
             }
             ItemType::_Dummy => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
             }
         }
         if has_options {
-            write!(interface, " [OPTIONS...]").unwrap();
+            write!(interface, " [OPTIONS...]")?;
         }
-        writeln!(interface).unwrap();
+        writeln!(interface)?;
+        Ok(())
     }
 
-    fn print_long_help(&mut self, interface: &mut I, item: &Item<I, T>) {
-        writeln!(interface, "SUMMARY:").unwrap();
+    fn print_long_help(&mut self, interface: &mut I, item: &Item<I, T>) -> Result<(), MenuError> {
+        writeln!(interface, "SUMMARY:")?;
         match item.item_type {
             ItemType::Callback { parameters, .. } => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
                 if !parameters.is_empty() {
                     for param in parameters.iter() {
                         match param {
                             Parameter::Mandatory { parameter_name, .. } => {
-                                write!(interface, " <{}>", parameter_name).unwrap();
+                                write!(interface, " <{}>", parameter_name)?;
                             }
                             Parameter::Optional { parameter_name, .. } => {
-                                write!(interface, " [ <{}> ]", parameter_name).unwrap();
+                                write!(interface, " [ <{}> ]", parameter_name)?;
                             }
                             Parameter::Named { parameter_name, .. } => {
-                                write!(interface, " [ --{} ]", parameter_name).unwrap();
+                                write!(interface, " [ --{} ]", parameter_name)?;
                             }
                             Parameter::NamedValue {
                                 parameter_name,
                                 argument_name,
                                 ..
                             } => {
-                                write!(interface, " [ --{}={} ]", parameter_name, argument_name)
-                                    .unwrap();
+                                write!(interface, " [ --{}={} ]", parameter_name, argument_name)?;
                             }
                         }
                     }
-                    writeln!(interface, "\n\nPARAMETERS:").unwrap();
+                    writeln!(interface, "\n\nPARAMETERS:")?;
                     let default_help = "Undocumented option";
                     for param in parameters.iter() {
                         match param {
@@ -649,8 +669,7 @@ where
                                     "  <{0}>\n    {1}\n",
                                     parameter_name,
                                     help.unwrap_or(default_help),
-                                )
-                                .unwrap();
+                                )?;
                             }
                             Parameter::Optional {
                                 parameter_name,
@@ -661,8 +680,7 @@ where
                                     "  <{0}>\n    {1}\n",
                                     parameter_name,
                                     help.unwrap_or(default_help),
-                                )
-                                .unwrap();
+                                )?;
                             }
                             Parameter::Named {
                                 parameter_name,
@@ -673,8 +691,7 @@ where
                                     "  --{0}\n    {1}\n",
                                     parameter_name,
                                     help.unwrap_or(default_help),
-                                )
-                                .unwrap();
+                                )?;
                             }
                             Parameter::NamedValue {
                                 parameter_name,
@@ -687,23 +704,23 @@ where
                                     parameter_name,
                                     argument_name,
                                     help.unwrap_or(default_help),
-                                )
-                                .unwrap();
+                                )?;
                             }
                         }
                     }
                 }
             }
             ItemType::Menu(_menu) => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
             }
             ItemType::_Dummy => {
-                write!(interface, "  {}", item.command).unwrap();
+                write!(interface, "  {}", item.command)?;
             }
         }
         if let Some(help) = item.help {
-            writeln!(interface, "\n\nDESCRIPTION:\n{}", help).unwrap();
+            writeln!(interface, "\n\nDESCRIPTION:\n{}", help)?;
         }
+        Ok(())
     }
 
     fn call_function(
@@ -714,7 +731,7 @@ where
         parent_menu: &Menu<I, T>,
         item: &Item<I, T>,
         command: &str,
-    ) {
+    ) -> Result<(), MenuError> {
         let mandatory_parameter_count = parameters
             .iter()
             .filter(|p| matches!(p, Parameter::Mandatory { .. }))
@@ -761,17 +778,17 @@ where
                         }
                     }
                     if !found {
-                        writeln!(interface, "Error: Did not understand {:?}", arg).unwrap();
-                        return;
+                        writeln!(interface, "Error: Did not understand {:?}", arg)?;
+                        return Ok(());
                     }
                 } else {
                     positional_arguments += 1;
                 }
             }
             if positional_arguments < mandatory_parameter_count {
-                writeln!(interface, "Error: Insufficient arguments given").unwrap();
+                writeln!(interface, "Error: Insufficient arguments given")?;
             } else if positional_arguments > positional_parameter_count {
-                writeln!(interface, "Error: Too many arguments given").unwrap();
+                writeln!(interface, "Error: Too many arguments given")?;
             } else {
                 callback_function(
                     parent_menu,
@@ -786,9 +803,10 @@ where
             if mandatory_parameter_count == 0 {
                 callback_function(parent_menu, item, &[], interface, context);
             } else {
-                writeln!(interface, "Error: Insufficient arguments given").unwrap();
+                writeln!(interface, "Error: Insufficient arguments given")?;
             }
         }
+        Ok(())
     }
 }
 
