@@ -1,6 +1,6 @@
 //! # Menu
 //!
-//! A basic command-line interface for `#![no_std]` Rust programs. Peforms
+//! A basic command-line interface for `#![no_std]` Rust programs. Performs
 //! zero heap allocation.
 #![no_std]
 #![feature(trait_alias)]

@@ -23,6 +23,7 @@ pub type ItemCallbackFn<I, T> =
 pub enum MenuError {
     WriteError,
     NestedTooDeep,
+    InvalidMenuIndex,
 }
 
 impl<E> From<embedded_io::WriteFmtError<E>> for MenuError {

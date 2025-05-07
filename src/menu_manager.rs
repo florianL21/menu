@@ -42,7 +42,7 @@ impl<'a, I, T> MenuManager<'a, I, T> {
         let menu = self.get_menu(None);
         let item = menu.items[index];
         if !matches!(item.item_type, ItemType::Menu(_)) {
-            panic!("Specified index is not a menu");
+            return Err(MenuError::InvalidMenuIndex);
         }
 
         let pos = self
@@ -73,7 +73,8 @@ impl<'a, I, T> MenuManager<'a, I, T> {
             if let ItemType::Menu(m) = menu.items[position].item_type {
                 menu = m
             } else {
-                panic!("Selected item is not a menu");
+                // panic!("Selected item is not a menu");
+                break;
             }
         }
 
